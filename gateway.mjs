@@ -1,5 +1,5 @@
 /**
- * gateway.mjs — AI Chat Gateway v1.0.0
+ * gateway.mjs — AI Chat Gateway v2.0.0
  *
  * HTTP wrapper untuk MCP server + Ollama.
  * Jalankan: node gateway.mjs
@@ -9,6 +9,11 @@
  *   GET  /api/sessions      — list semua session aktif
  *   DELETE /api/sessions/:id — hapus session (reset history)
  *   GET  /api/health        — cek status server
+ *
+ * Role yang didukung (field "role" di request body):
+ *   cs      — customer service, akses terbatas (default tanpa login)
+ *   spv     — supervisor, akses internal penuh
+ *   finance — tim finance, fokus data keuangan
  */
 
 import express              from "express";
@@ -59,64 +64,157 @@ function log(tag, msg) {
 }
 
 // ============================================================
-//  SYSTEM PROMPT
+//  ROLE CONFIG — system prompt + akses per role
 // ============================================================
-const SYSTEM_PROMPT = `Kamu adalah AI database analyst untuk sistem konstruksi. Jawab dalam Bahasa Indonesia.
+
+const ATURAN_UMUM = `
+BAHASA: Selalu jawab dalam Bahasa Indonesia. DILARANG menjawab dalam bahasa lain apapun.
 
 ATURAN KONTEKS PERCAKAPAN:
 - Kamu memiliki akses ke history percakapan sebelumnya
-- Jika user menggunakan kata ganti seperti "datanya", "itu", "tabel tadi", "yang tadi" — gunakan konteks dari history untuk menentukan maksudnya
+- Kata ganti "itu", "tadi", "tersebut", "project itu", "user itu" → merujuk ke data yang baru dibahas
 - JANGAN minta konfirmasi jika konteks sudah jelas dari history
-- Contoh: user tanya struktur "projects" lalu bilang "tampilkan datanya" → langsung query tabel projects
+- Contoh: setelah bahas project X, user tanya "user yang terdaftar ke project itu" → query users di project X
 
-ATURAN TOOL:
-
+ATURAN TOOL — WAJIB DIPATUHI:
 [TANYA_DATABASE]
-- Gunakan jika user meminta data, laporan, atau angka dari database
-- LANGSUNG panggil tanya_database — JANGAN panggil daftar_tabel dulu
-- Satu pertanyaan = satu tool call
-- Tampilkan data RAW dari hasil tool, JANGAN diringkas kecuali diminta
-- Jika nama tabel tidak disebut tapi jelas dari konteks history → gunakan tabel tersebut
+- WAJIB dipanggil untuk SETIAP pertanyaan tentang data, termasuk pertanyaan lanjutan
+- TIDAK BOLEH skip tool meski topik sudah dibahas sebelumnya di history
+- Gunakan konteks dari history untuk tentukan filter WHERE yang tepat
+- LANGSUNG panggil tanpa daftar_tabel dulu
 
-[LIHAT_STRUKTUR_TABEL]
-- Gunakan hanya jika user tanya struktur atau kolom tabel tertentu
+[LIHAT_STRUKTUR_TABEL] Gunakan jika user tanya struktur/kolom tabel.
+[DAFTAR_TABEL] HANYA jika user tanya "tabel apa saja yang ada".
+[BACA_CATATAN] Untuk pertanyaan tentang catatan/memory tersimpan.
+[TULIS_CATATAN] HANYA jika user eksplisit minta simpan catatan.
+[DOKUMEN — cari_dokumen, baca_dokumen, list_dokumen]
+  - SETIAP pertanyaan peraturan/kebijakan WAJIB panggil cari_dokumen
+  - File .md adalah SATU-SATUNYA sumber kebenaran untuk peraturan
 
-[DAFTAR_TABEL]
-- Gunakan HANYA jika user tanya "tabel apa saja yang ada"
-- JANGAN panggil sebelum atau bersamaan dengan tanya_database
+ATURAN OUTPUT:
+- Tampilkan data aktual dari hasil tool, format sebagai tabel atau list yang rapi
+- DILARANG jawab dari ingatan sendiri tanpa tool
+- DILARANG menambahkan catatan atau disclaimer yang tidak ada di hasil tool
+- DILARANG membatasi tampilan data dengan alasan "kerahasiaan" kecuali diperintahkan
 
-[BACA_CATATAN]
-- Gunakan jika user tanya tentang catatan atau memory tersimpan
-- Jawab HANYA dari isi catatan — DILARANG mengarang
-- Jika tidak ada di catatan → katakan "Tidak ada di catatan"
+LARANGAN MUTLAK:
+- DILARANG skip tool call untuk pertanyaan lanjutan — SETIAP pertanyaan data WAJIB query ulang
+- DILARANG mensimulasikan atau mengarang hasil tool call dalam teks
+- DILARANG menulis format seperti {NAMA_TOOL: {...}} di dalam jawaban
+- DILARANG mengklaim berhasil melakukan sesuatu jika tool tidak dipanggil
+- DILARANG mengarang nama, angka, atau data yang tidak berasal dari database
+- Jika tool tidak tersedia untuk role kamu → katakan "Fitur ini tidak tersedia untuk role Anda"`;
 
-[TULIS_CATATAN]
-- HANYA jika user SECARA EKSPLISIT minta simpan catatan
-- DILARANG dipanggil otomatis
+// Tools yang bisa dipakai per role
+// null = semua tools boleh, array = whitelist tools
+const READ_ONLY_TOOLS  = ["tanya_database", "lihat_struktur_tabel", "daftar_tabel", "baca_catatan", "list_dokumen", "cari_dokumen", "baca_dokumen"]
+const WRITE_TOOLS      = ["tulis_catatan", "perbarui_catatan", "hapus_semua_catatan", "refresh_cache"]
+const ALL_TOOLS        = [...READ_ONLY_TOOLS, ...WRITE_TOOLS]
+const ROLE_CONFIG = {
 
-[DOKUMEN PERUSAHAAN — list_dokumen, cari_dokumen, baca_dokumen]
-- Gunakan untuk pertanyaan tentang: peraturan, kebijakan, SOP, prosedur, hak, kewajiban karyawan
-- SETIAP pertanyaan tentang peraturan WAJIB panggil cari_dokumen — meskipun topik sudah dibahas sebelumnya
-- Alur: cari_dokumen(keyword) → jika perlu detail → baca_dokumen(path)
-- Contoh trigger: "cuti", "lembur", "reimburse", "jam kerja", "keterlambatan", "gaji", "absen", "SP"
-- JANGAN gunakan tanya_database untuk pertanyaan peraturan — gunakan cari_dokumen
-- File .md adalah SATU-SATUNYA sumber kebenaran — DILARANG jawab dari pengetahuan umum atau UU
+  // ── Customer Service — default tanpa login ──────────────────
+  cs: {
+    systemPrompt: `Kamu adalah customer service AI yang ramah dan profesional untuk perusahaan konstruksi NKS.
+Bantu customer dengan pertanyaan seputar produk, layanan, status proyek, dan kebijakan umum.
+Jawab dalam Bahasa Indonesia yang hangat dan mudah dipahami.
+Jika tidak bisa menjawab, sarankan customer untuk menghubungi tim CS kami.
+${ATURAN_UMUM}
+BATASAN AKSES:
+- HANYA boleh akses tabel: projects, vendors
+- DILARANG tampilkan data keuangan, gaji, atau data internal sensitif
+- DILARANG akses dokumen internal HR atau operasional
+- Jika ditanya di luar kapasitas → "Untuk informasi lebih lanjut, silakan hubungi tim CS kami"`,
+    allowedTables: ["projects", "vendors"],
+    allowedDocs:   ["faq", "policy"],
+    allowedTools:  READ_ONLY_TOOLS,
+    maxHistory:    10,
+    toolRestrictionMsg: "Kamu TIDAK memiliki akses untuk menulis, mengubah, atau menghapus catatan. Jika diminta, katakan: 'Maaf, fitur ini hanya tersedia untuk Admin.'",
+  },
 
-ATURAN SETELAH TOOL RETURN DATA:
-- Setelah tanya_database return hasil, cukup tulis: "Ditemukan X baris dari tabel Y." lalu tampilkan MAKSIMAL 3 baris pertama sebagai contoh
-- JANGAN tulis ulang seluruh JSON — terlalu panjang dan tidak perlu
-- Jika user ingin lihat semua data, sarankan filter lebih spesifik
-- Untuk list_dokumen dan cari_dokumen, rangkum hasil secara singkat
+  // ── Supervisor — baca semua, tidak bisa ubah knowledge ─────
+  spv: {
+    systemPrompt: `Kamu adalah AI analyst internal untuk level Supervisor perusahaan konstruksi NKS.
+Kamu bisa akses semua data database dan dokumen perusahaan sesuai kebutuhan operasional.
+Jawab dalam Bahasa Indonesia yang profesional dan ringkas.
+${ATURAN_UMUM}`,
+    allowedTables: null,
+    allowedDocs:   null,
+    allowedTools:  READ_ONLY_TOOLS,
+    maxHistory:    20,
+    toolRestrictionMsg: "Kamu TIDAK memiliki akses untuk menulis, mengubah, atau menghapus catatan. Jika diminta, katakan: 'Maaf, fitur ini hanya tersedia untuk Admin.'",
+  },
 
-LARANGAN KERAS:
-- DILARANG jawab pertanyaan database dari ingatan sendiri tanpa tool
-- DILARANG jawab pertanyaan peraturan perusahaan tanpa memanggil cari_dokumen terlebih dahulu
-- DILARANG menggunakan pengetahuan umum tentang UU Ketenagakerjaan atau aturan luar sebagai jawaban
-- Jika cari_dokumen tidak menemukan hasil → katakan "Tidak ada informasi di dokumen perusahaan"
-- DILARANG merangkum data kecuali diminta
-- DILARANG panggil tool yang tidak relevan
-- DILARANG minta konfirmasi tabel jika sudah jelas dari percakapan sebelumnya
-- DILARANG menulis ulang seluruh JSON hasil query — cukup konfirmasi jumlah baris`;
+  // ── Finance — baca semua, tidak bisa ubah knowledge ────────
+  finance: {
+    systemPrompt: `Kamu adalah AI analyst untuk tim Finance perusahaan konstruksi NKS.
+Fokus pada analisis data keuangan, budget, realisasi, dan laporan.
+Jawab dalam Bahasa Indonesia yang formal, akurat, dan detail.
+${ATURAN_UMUM}
+FOKUS AKSES:
+- Prioritaskan tabel: transactions, budgets, contracts, projects, rab_headers, rab_items, realization_reports
+- Untuk kalkulasi profit/loss, selalu gunakan data aktual dari database`,
+    allowedTables: null,
+    allowedDocs:   null,
+    allowedTools:  READ_ONLY_TOOLS,
+    maxHistory:    20,
+    toolRestrictionMsg: "Kamu TIDAK memiliki akses untuk menulis, mengubah, atau menghapus catatan. Jika diminta, katakan: 'Maaf, fitur ini hanya tersedia untuk Admin.'",
+  },
+
+  // ── Director — baca semua, tidak bisa ubah knowledge ───────
+  director: {
+    systemPrompt: `Kamu adalah AI analyst untuk level Direktur perusahaan konstruksi NKS.
+Berikan analisis ringkas dan insight strategis dari data yang ada.
+Jawab dalam Bahasa Indonesia yang eksekutif — singkat, padat, dan actionable.
+${ATURAN_UMUM}`,
+    allowedTables: null,
+    allowedDocs:   null,
+    allowedTools:  READ_ONLY_TOOLS,
+    maxHistory:    20,
+    toolRestrictionMsg: "Kamu TIDAK memiliki akses untuk menulis, mengubah, atau menghapus catatan. Jika diminta, katakan: 'Maaf, fitur ini hanya tersedia untuk Admin.'",
+  },
+
+  // ── Admin — akses penuh termasuk kelola knowledge ──────────
+  admin: {
+    systemPrompt: `Kamu adalah AI analyst untuk Admin sistem perusahaan konstruksi NKS.
+Kamu punya akses penuh termasuk mengelola knowledge base dan konfigurasi sistem.
+Jawab dalam Bahasa Indonesia yang teknis dan detail.
+${ATURAN_UMUM}`,
+    allowedTables: null,
+    allowedDocs:   null,
+    allowedTools:  ALL_TOOLS,  // Admin bisa semua termasuk tulis/hapus knowledge
+    maxHistory:    20,
+  },
+};
+
+// Default role jika tidak ada atau tidak dikenal
+const DEFAULT_ROLE = "cs";
+
+function getRoleConfig(role) {
+  const config = ROLE_CONFIG[role] || ROLE_CONFIG[DEFAULT_ROLE];
+  // Inject restriction message ke system prompt jika ada
+  if (config.toolRestrictionMsg) {
+    return {
+      ...config,
+      systemPrompt: config.systemPrompt + `
+
+BATASAN ROLE:
+${config.toolRestrictionMsg}`,
+    };
+  }
+  return config;
+}
+
+// Validasi tabel — filter jika role punya allowedTables
+function isTableAllowed(tableName, allowedTables) {
+  if (!allowedTables) return true;
+  return allowedTables.includes(tableName.toLowerCase());
+}
+
+// Validasi tool — filter berdasarkan allowedTools role
+function isToolAllowed(toolName, allowedTools) {
+  if (!allowedTools) return true;
+  return allowedTools.includes(toolName);
+}
 
 // ============================================================
 //  SESSION MANAGER
@@ -238,9 +336,13 @@ class McpClientManager {
     return result.content?.[0]?.text ?? "";
   }
 
-  /** Convert MCP tools ke format Ollama tools */
-  getOllamaTools() {
-    return this.tools.map((t) => ({
+  /** Convert MCP tools ke format Ollama tools, filter by allowedTools */
+  getOllamaTools(allowedTools = null) {
+    const tools = allowedTools
+      ? this.tools.filter(t => allowedTools.includes(t.name))
+      : this.tools;
+
+    return tools.map((t) => ({
       type: "function",
       function: {
         name:        t.name,
@@ -256,8 +358,11 @@ const mcp = new McpClientManager();
 // ============================================================
 //  OLLAMA CHAT — dengan tool call loop
 // ============================================================
-async function chatWithTools(messages) {
-  const ollamaTools = mcp.getOllamaTools();
+async function chatWithTools(messages, roleConfig = {}) {
+  // Kirim HANYA tools yang diizinkan ke model
+  // Dengan begitu model tidak tahu tool lain ada — tidak bisa simulate
+  const ollamaTools = mcp.getOllamaTools(roleConfig.allowedTools || null);
+  log("AUTH", `Role ${roleConfig._role || 'unknown'} — ${ollamaTools.length} tools aktif: ${ollamaTools.map(t=>t.function.name).join(', ')}`);
   const allMessages  = [...messages];
 
   // Loop maksimal 5 iterasi untuk cegah infinite tool call
@@ -303,18 +408,34 @@ async function chatWithTools(messages) {
     const msg  = data.message;
 
     // ── Guard: reply kosong tapi tidak ada tool call ──────────
-    // Ini terjadi saat model bingung atau VRAM hampir habis
     const hasToolCalls = msg.tool_calls && msg.tool_calls.length > 0;
     const hasContent   = msg.content && msg.content.trim().length > 0;
 
     if (!hasToolCalls && !hasContent) {
       log("WARN", `Iter ${iter+1}: model return kosong — retry dengan hint`);
-      // Tambah hint agar model mau respond
       allMessages.push({
         role:    "user",
         content: "Tolong jawab pertanyaan saya. Gunakan tool yang tersedia jika diperlukan.",
       });
       continue;
+    }
+
+    // ── Guard: model jawab tanpa tool padahal pertanyaan tentang data ──
+    // Deteksi pertanyaan lanjutan yang butuh tool tapi model skip
+    if (!hasToolCalls && hasContent && iter === 0) {
+      const lastUserMsg = [...allMessages].reverse().find(m => m.role === "user")?.content || "";
+      const isDataQuery = /\b(siapa|berapa|tampilkan|lihat|daftar|cari|user|data|project|vendor|nilai|total|list|ada|terdaftar|assigned|member)\b/i.test(lastUserMsg);
+      const hasDbTool   = ollamaTools.some(t => t.function.name === "tanya_database");
+
+      if (isDataQuery && hasDbTool) {
+        log("FORCE", `Model skip tool untuk pertanyaan data — paksa tanya_database`);
+        allMessages.push({ role: "assistant", content: msg.content });
+        allMessages.push({
+          role:    "user",
+          content: `Kamu harus memanggil tool tanya_database untuk menjawab pertanyaan ini. Jangan jawab dari ingatan. Panggil tool sekarang.`,
+        });
+        continue;
+      }
     }
 
     // Tidak ada tool call → selesai, return jawaban
@@ -332,6 +453,22 @@ async function chatWithTools(messages) {
         : fn.arguments;
 
       log("TOOL", `${fn.name}(${JSON.stringify(toolArgs).slice(0, 100)})`);
+
+      // Double-check permission saat eksekusi (defense in depth)
+      if (!isToolAllowed(fn.name, roleConfig.allowedTools)) {
+        log("GUARD", `Tool ${fn.name} ditolak untuk role ${roleConfig._role || 'unknown'}`);
+        allMessages.push({
+          role:    "tool",
+          content: `❌ Akses ditolak: tool '${fn.name}' tidak tersedia untuk role Anda.`,
+        });
+        continue;
+      }
+
+      // Inject allowed_folders untuk tool dokumen berdasarkan role
+      if (["cari_dokumen", "list_dokumen"].includes(fn.name) && roleConfig.allowedDocs) {
+        toolArgs.allowed_folders = roleConfig.allowedDocs;
+        log("AUTH", `${fn.name}: filter folder → [${roleConfig.allowedDocs.join(", ")}]`);
+      }
 
       let toolResult;
       try {
@@ -392,7 +529,7 @@ app.use((req, res, next) => {
  * }
  */
 app.post("/api/chat", async (req, res) => {
-  const { session_id, message } = req.body;
+  const { session_id, message, role = DEFAULT_ROLE } = req.body;
 
   // Validasi input
   if (!session_id || typeof session_id !== "string") {
@@ -402,25 +539,23 @@ app.post("/api/chat", async (req, res) => {
     return res.status(400).json({ error: "message wajib diisi dan tidak boleh kosong" });
   }
 
-  log("CHAT", `[${session_id}] ${message.slice(0, 80)}`);
+  const config = getRoleConfig(role);
+  log("CHAT", `[${session_id}][${role}] ${message.slice(0, 80)}`);
 
   try {
     const session = sessions.getOrCreate(session_id);
 
-    // Susun messages untuk Ollama DULU (snapshot history saat ini)
-    // PENTING: addMessage dilakukan SETELAH snapshot agar pesan user
-    // masuk dalam urutan yang benar ke Ollama
     const historySnapshot = [...session.history];
     sessions.addMessage(session_id, "user", message.trim());
 
     const ollamaMessages = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: config.systemPrompt },
       ...historySnapshot,
       { role: "user", content: message.trim() },
     ];
 
     // Kirim ke Ollama + eksekusi tool via MCP
-    const { reply } = await chatWithTools(ollamaMessages);
+    const { reply } = await chatWithTools(ollamaMessages, { ...config, _role: role });
 
     // Simpan balasan AI ke history
     sessions.addMessage(session_id, "assistant", reply);
@@ -429,6 +564,7 @@ app.post("/api/chat", async (req, res) => {
 
     return res.json({
       session_id,
+      role,
       reply,
       history_count: session.history.length,
     });
@@ -465,13 +601,19 @@ app.get("/api/history/:id", (req, res) => {
 // ── GET /api/health ──────────────────────────────────────────
 app.get("/api/health", (req, res) => {
   res.json({
-    status:       "ok",
+    status:        "ok",
     mcp_connected: mcp.connected,
-    mcp_tools:    mcp.tools.map(t => t.name),
-    ollama_url:   OLLAMA_URL,
-    ollama_model: OLLAMA_MODEL,
-    sessions:     sessions.sessions.size,
-    uptime_sec:   Math.floor(process.uptime()),
+    mcp_tools:     mcp.tools.map(t => t.name),
+    ollama_url:    OLLAMA_URL,
+    ollama_model:  OLLAMA_MODEL,
+    roles:         Object.keys(ROLE_CONFIG).map(r => ({
+      role:          r,
+      allowedTools:  ROLE_CONFIG[r].allowedTools?.length ?? "all",
+      allowedTables: ROLE_CONFIG[r].allowedTables?.length ?? "all",
+    })),
+    default_role:  DEFAULT_ROLE,
+    sessions:      sessions.sessions.size,
+    uptime_sec:    Math.floor(process.uptime()),
   });
 });
 

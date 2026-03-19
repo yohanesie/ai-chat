@@ -150,6 +150,35 @@ header {
 #inp-url  { width: 200px; }
 #inp-sid  { width: 130px; }
 
+.role-select {
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.role-select:focus { border-color: var(--accent); }
+
+.role-badge {
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.role-badge.cs       { background: #1a2535; color: #60a5fa; border: 1px solid #60a5fa33; }
+.role-badge.spv      { background: #1a2520; color: #00d4a0; border: 1px solid #00d4a033; }
+.role-badge.finance  { background: #251f10; color: #f59e0b; border: 1px solid #f59e0b33; }
+.role-badge.director { background: #251520; color: #c084fc; border: 1px solid #c084fc33; }
+.role-badge.admin    { background: #251010; color: #ff6b6b; border: 1px solid #ff6b6b33; }
+
 /* ── Messages ── */
 #messages {
   flex: 1;
@@ -470,6 +499,14 @@ header {
   <input id="inp-url" value="http://localhost:3001" placeholder="http://localhost:3001">
   <label>Session ID</label>
   <input id="inp-sid" value="demo-1" placeholder="user-123">
+  <label>Role</label>
+  <select id="inp-role" class="role-select" onchange="onRoleChange()">
+    <option value="cs">cs — Customer Service</option>
+    <option value="spv" selected>spv — Supervisor</option>
+    <option value="finance">finance — Finance</option>
+    <option value="director">director — Director</option>
+    <option value="admin">admin — Administrator</option>
+  </select>
   <span id="history-info" class="history-badge" style="display:none">0 pesan</span>
 </div>
 
@@ -479,14 +516,14 @@ header {
   </div>
 </div>
 
-<div class="quick-prompts" id="quick-prompts">
+<!-- <div class="quick-prompts" id="quick-prompts">
   <button class="qp" onclick="sendQuick('dokumen apa saja yang tersedia?')">dokumen tersedia</button>
   <button class="qp" onclick="sendQuick('berapa hari cuti tahunan karyawan?')">peraturan cuti</button>
   <button class="qp" onclick="sendQuick('bagaimana prosedur reimburse?')">prosedur reimburse</button>
   <button class="qp" onclick="sendQuick('tampilkan 5 data projects terbaru')">data projects</button>
   <button class="qp" onclick="sendQuick('tabel apa saja yang ada di database?')">list tabel</button>
   <button class="qp" onclick="sendQuick('lihat struktur tabel projects')">struktur tabel</button>
-</div>
+</div> -->
 
 <div class="input-area">
   <div class="input-row">
@@ -559,11 +596,13 @@ function addMessage(role, text, extra = {}) {
   } else {
     const hBadge = extra.history_count != null
       ? `<span class="history-badge">${extra.history_count} pesan</span>` : ''
+    const rBadge = extra.role
+      ? `<span class="role-badge ${extra.role}">${extra.role}</span>` : ''
     div.innerHTML = `
       <div class="avatar">AI</div>
       <div>
         <div class="bubble"><p>${renderMarkdown(text)}</p></div>
-        <div class="meta">${time} ${hBadge}</div>
+        <div class="meta">${time} ${rBadge} ${hBadge}</div>
       </div>`
     if (extra.history_count != null) {
       historyCount = extra.history_count
@@ -604,6 +643,7 @@ async function sendMessage() {
   if (isLoading) return
   const url     = $('inp-url').value.trim()
   const sid     = $('inp-sid').value.trim() || 'demo-1'
+  const role    = $('inp-role').value || 'cs'
   const msgEl   = $('inp-msg')
   const message = msgEl.value.trim()
 
@@ -620,7 +660,7 @@ async function sendMessage() {
     const res = await fetch(`${url}/api/chat`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ session_id: sid, message }),
+      body:    JSON.stringify({ session_id: sid, message, role }),
     })
 
     const data = await res.json()
@@ -630,7 +670,8 @@ async function sendMessage() {
       addMessage('system', `error ${res.status}: ${data.error || 'unknown'}`)
     } else {
       addMessage('ai', data.reply || '(tidak ada balasan)', {
-        history_count: data.history_count
+        history_count: data.history_count,
+        role: data.role,
       })
     }
   } catch (err) {
@@ -657,6 +698,27 @@ function setLoading(v) {
 }
 
 // ── Reset sesi ────────────────────────────────────────────────
+function onRoleChange() {
+  const role = $('inp-role').value
+  const labels = {
+    cs:       'CS — Customer Service',
+    spv:      'SPV — Supervisor',
+    finance:  'Finance',
+    director: 'Director',
+    admin:    'Administrator',
+  }
+
+  // Auto reset session saat ganti role
+  const url = $('inp-url').value.trim()
+  const sid = $('inp-sid').value.trim() || 'demo-1'
+  fetch(`${url}/api/sessions/${sid}`, { method: 'DELETE' }).catch(() => {})
+
+  historyCount = 0
+  $('history-info').style.display = 'none'
+  $('messages').innerHTML = ''
+  addMessage('system', `mode: ${labels[role] || role} — sesi direset`)
+}
+
 async function clearSession() {
   const url = $('inp-url').value.trim()
   const sid = $('inp-sid').value.trim() || 'demo-1'

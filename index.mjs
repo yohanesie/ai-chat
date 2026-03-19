@@ -349,7 +349,7 @@ function validateAndCleanSQL(rawSql) {
 // ============================================================
 async function askLLM(systemPrompt, userPrompt) {
   const controller = new AbortController();
-  const timeout    = setTimeout(() => controller.abort(), 60_000);
+  const timeout    = setTimeout(() => controller.abort(), 30_000);
 
   try {
     const res = await fetch(`${OLLAMA_URL}/api/chat`, {
@@ -627,7 +627,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "Gunakan jika user tanya 'dokumen apa saja yang ada', 'peraturan apa yang tersimpan',",
         "'file apa yang bisa dibaca', atau sebelum cari_dokumen jika tidak tahu keyword.",
       ].join(" "),
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      inputSchema: {
+        type: "object",
+        properties: {
+          allowed_folders: {
+            type: "array",
+            items: { type: "string" },
+            description: "Folder yang boleh diakses. Kosong = semua folder.",
+          },
+        },
+        additionalProperties: false,
+      },
     },
 
     // ── 10. cari_dokumen ──────────────────────────────────────
@@ -646,6 +656,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           keyword: {
             type: "string",
             description: "Kata kunci yang dicari. Contoh: 'cuti', 'lembur', 'reimburse'",
+          },
+          allowed_folders: {
+            type: "array",
+            items: { type: "string" },
+            description: "Folder yang boleh diakses. Kosong = semua folder.",
           },
         },
         required: ["keyword"],
@@ -1014,10 +1029,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // ── list_dokumen ─────────────────────────────────────────
     if (toolName === "list_dokumen") {
-      const files = await scanMarkdownFiles(DOCS_DIR);
+      const allowedFolders = args.allowed_folders || [];
+      const allFiles = await scanMarkdownFiles(DOCS_DIR);
+      const files = allowedFolders.length > 0
+        ? allFiles.filter(f => {
+            const rel = f.replace(DOCS_DIR, "").replace(/\\/g, "/").replace(/^\//, "");
+            return allowedFolders.some(folder => rel.startsWith(folder + "/") || rel.startsWith(folder));
+          })
+        : allFiles;
+
       if (files.length === 0) {
         return {
-          content: [{ type: "text", text: "📭 Belum ada dokumen di folder docs/. Buat folder docs/ dan tambahkan file .md." }],
+          content: [{ type: "text", text: "📭 Belum ada dokumen yang bisa diakses." }],
         };
       }
       const list = files.map((f) => {
@@ -1031,12 +1054,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // ── cari_dokumen ─────────────────────────────────────────
     if (toolName === "cari_dokumen") {
-      const keyword = (args.keyword || "").trim();
+      const keyword        = (args.keyword || "").trim();
+      const allowedFolders = args.allowed_folders || [];
+
       if (!keyword) {
         return { content: [{ type: "text", text: "❌ Keyword tidak boleh kosong." }] };
       }
 
-      const results = await searchDocs(keyword);
+      let results = await searchDocs(keyword);
+
+      // Filter hasil berdasarkan allowed_folders
+      if (allowedFolders.length > 0) {
+        results = results.filter(r =>
+          allowedFolders.some(folder => r.file.startsWith(folder + "/") || r.file.startsWith(folder))
+        );
+      }
       if (results.length === 0) {
         return {
           content: [{ type: "text", text: `🔍 Tidak ditemukan dokumen yang mengandung keyword "${keyword}".` }],
