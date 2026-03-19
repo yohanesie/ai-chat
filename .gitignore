@@ -1,0 +1,15 @@
+# Buat .gitignore
+@"
+# Environment variables - JANGAN pernah di-commit!
+.env
+
+# Dependencies
+node_modules/
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+"@ | Set-Content C:\mcp-server\.gitignore -Encoding UTF8
