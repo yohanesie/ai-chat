@@ -1,9 +1,10 @@
 /**
- * gateway.mjs — AI Chat Gateway v2.2.0
- * Perubahan dari v2.1:
- * - Tambah endpoint POST /api/search (semantic product search)
- * - Import semantic-search.mjs
- * - /api/health include product index info
+ * gateway.mjs — AI Chat Gateway v2.1.0
+ * Perubahan dari v2.0:
+ * - Streaming fix: JSON.parse try-catch agar tidak crash
+ * - SSE parser yang benar (slice 6 chars, bukan replace)
+ * - executeTool() helper — logic tool reuse antara chat & stream
+ * - CORS, session, role config tetap sama
  */
 
 import express                  from "express";
@@ -13,7 +14,6 @@ import { fileURLToPath }        from "url";
 import { dirname, join }        from "path";
 import { Client }               from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { searchProducts, getIndexInfo, warmProductIndex } from "./semantic-search.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -52,10 +52,12 @@ function log(tag, msg) {
 const ATURAN_UMUM = `
 BAHASA: Selalu jawab dalam Bahasa Indonesia.
 
-[DOKUMEN]
+[DOKUMEN - WAJIB DIPATUHI]
 - Glosarium/Istilah: LANGSUNG panggil cari_dokumen.
+- pp/pp.md → Peraturan Perusahaan YOGYA Group (pasal-pasal, hak karyawan, dll)
 - Kebijakan: cari_dokumen lalu baca_dokumen.
 - Sumber Tunggal: Hanya file .md, dilarang mengarang.
+- DILARANG MUTLAK menambah, mengurangi, atau mengubah isi dokumen
 
 ATURAN TOOL:
 [TANYA_DATABASE] WAJIB untuk setiap pertanyaan data. LANGSUNG panggil tanpa daftar_tabel.
@@ -283,10 +285,15 @@ async function chatWithTools(messages, roleConfig = {}) {
 async function chatWithToolsStream(messages, roleConfig, res, sessionId) {
   const ollamaTools = mcp.getOllamaTools(roleConfig.allowedTools || null);
   let   allMessages = [...messages];
+  let   toolCallCount = 0;        // ← tambah counter
+  const MAX_TOOL_CALLS = 3;       // ← maksimal 3 tool call per turn
 
   for (let iter = 0; iter < 5; iter++) {
     const controller = new AbortController();
     const timeout    = setTimeout(() => controller.abort(), 120_000);
+
+    // Kalau sudah melebihi batas tool call, paksa stop dengan kosongkan tools
+    const activeTools = toolCallCount >= MAX_TOOL_CALLS ? [] : ollamaTools;
 
     let ollamaRes;
     try {
@@ -294,7 +301,9 @@ async function chatWithToolsStream(messages, roleConfig, res, sessionId) {
         method: "POST", headers: { "Content-Type": "application/json" },
         signal: controller.signal,
         body: JSON.stringify({
-          model: OLLAMA_MODEL, messages: allMessages, tools: ollamaTools, stream: true,
+          model: OLLAMA_MODEL, messages: allMessages,
+          tools: activeTools,  // ← pakai activeTools bukan ollamaTools
+          stream: true,
           options: { temperature: 0, num_ctx: NUM_CTX, num_predict: 1024, repeat_penalty: 1.1 },
         }),
       });
@@ -314,20 +323,14 @@ async function chatWithToolsStream(messages, roleConfig, res, sessionId) {
 
       for (const line of lines) {
         if (!line.trim()) continue;
-
-        // ── FIX: try-catch agar tidak crash saat line bukan JSON ──
         let json;
         try { json = JSON.parse(line); } catch { continue; }
-
         if (json.done) break;
         const delta = json.message;
         if (!delta) continue;
-
         if (delta.tool_calls?.length) toolCalls = delta.tool_calls;
-
         if (delta.content) {
           fullContent += delta.content;
-          // ── FIX SSE: format yang benar ──
           res.write(`data: ${delta.content}\n\n`);
         }
       }
@@ -338,12 +341,31 @@ async function chatWithToolsStream(messages, roleConfig, res, sessionId) {
       return;
     }
 
+    // Tambah ke counter
+    toolCallCount += toolCalls.length;
+    log("TOOL-COUNT", `${toolCallCount}/${MAX_TOOL_CALLS} tool calls dipakai`);
+
     allMessages.push({ role: "assistant", content: fullContent, tool_calls: toolCalls });
     res.write(`data: \n\ndata: *— memproses ${toolCalls[0]?.function?.name || "tool"}...*\n\n`);
 
     for (const tc of toolCalls) {
-      const result = await executeTool(tc, roleConfig);
+      let result = await executeTool(tc, roleConfig);
+
+      // Tambah flag stop kalau hasil kosong
+      if (result.includes('0 baris ditemukan')) {
+        result += '\n[Data tidak ditemukan. Sampaikan ke user, jangan query ulang.]';
+      }
+
       allMessages.push({ role: "tool", content: result, tool_call_id: tc.id });
+    }
+
+    // Kalau sudah max tool calls, inject instruksi stop
+    if (toolCallCount >= MAX_TOOL_CALLS) {
+      log("TOOL-COUNT", "Batas tool call tercapai — force stop");
+      allMessages.push({
+        role: "user",
+        content: "Berikan jawaban final berdasarkan data yang sudah ada. Jangan panggil tool lagi.",
+      });
     }
   }
 
@@ -457,51 +479,6 @@ app.get("/api/health", (req, res) => {
     sessions: sessions.sessions.size,
     uptime_sec: Math.floor(process.uptime()),
   });
-
-});
-
-
-// ── POST /api/search — Semantic product search ────────────────
-app.post("/api/search", async (req, res) => {
-  const { query, kategori, top_k = 10 } = req.body;
-
-  if (!query || typeof query !== "string" || !query.trim()) {
-    return res.status(400).json({ error: "query wajib diisi" });
-  }
-
-  const topK = Math.min(parseInt(top_k) || 10, 20);
-
-  try {
-    log("SEARCH", `"${query.trim()}"${kategori ? ` [${kategori}]` : ""}`);
-    const results = await searchProducts(query.trim(), {
-      topK,
-      threshold: 0.5,
-      category:  kategori || null,
-    });
-
-    return res.json({
-      query:   query.trim(),
-      total:   results.length,
-      results,
-    });
-  } catch (err) {
-    if (err.message.includes("Index belum ada")) {
-      return res.status(503).json({ error: "Index produk belum dibuat. Jalankan: node build-index.mjs" });
-    }
-    log("ERROR", `/api/search: ${err.message}`);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// ── GET /api/search/categories — List kategori tersedia ───────
-app.get("/api/search/categories", async (req, res) => {
-  try {
-    const info = await getIndexInfo();
-    if (!info.ready) return res.status(503).json({ error: info.message });
-    return res.json({ categories: info.categories, total: info.total });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
 });
 
 app.use((req, res) => res.status(404).json({ error: `${req.method} ${req.path} tidak ditemukan` }));
@@ -511,13 +488,8 @@ async function start() {
   try {
     await mcp.connect();
     app.listen(PORT, () => {
-      log("READY", `Gateway v2.2.0 → http://localhost:${PORT}`);
+      log("READY", `Gateway v2.1.0 → http://localhost:${PORT}`);
       log("READY", `Model: ${OLLAMA_MODEL}`);
-      // Pre-warm product index
-      warmProductIndex().then(n => {
-        if (n > 0) log("READY", `Search index: ${n} produk siap`);
-        else log("WARN", "Search index belum ada — jalankan: node build-index.mjs");
-      }).catch(() => {});
     });
   } catch (err) {
     console.error(`[ERROR] Gagal start: ${err.message}`);

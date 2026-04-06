@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pencarian Produk</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:         #0f0f0f;
+  --surface:    #161616;
+  --surface2:   #1e1e1e;
+  --border:     #262626;
+  --border2:    #333;
+  --text:       #e2e2e2;
+  --text2:      #888;
+  --text3:      #444;
+  --accent:     #00d4a0;
+  --accent-dim: #00d4a015;
+  --error:      #ff6b6b;
+  --warn:       #f59e0b;
+  --font:       'IBM Plex Sans', sans-serif;
+  --mono:       'IBM Plex Mono', monospace;
+}
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+/* ── Header ── */
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.logo {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: var(--accent); display: flex;
+  align-items: center; justify-content: center; flex-shrink: 0;
+}
+.logo svg { width: 16px; height: 16px; fill: #000; }
+
+.header-title { font-size: 15px; font-weight: 600; flex-shrink: 0; }
+
+/* ── Search bar ── */
+.search-wrap {
+  flex: 1;
+  max-width: 600px;
+  position: relative;
+}
+
+.search-input {
+  width: 100%;
+  background: var(--surface2);
+  border: 1.5px solid var(--border2);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  padding: 9px 44px 9px 16px;
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.search-input::placeholder { color: var(--text3); }
+
+.search-icon {
+  position: absolute;
+  right: 14px; top: 50%;
+  transform: translateY(-50%);
+  color: var(--text3);
+  pointer-events: none;
+}
+.search-icon.loading { animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: translateY(-50%) rotate(360deg); } }
+
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text3); flex-shrink: 0;
+  transition: background 0.3s;
+}
+.status-dot.online { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.status-dot.error  { background: var(--error); }
+
+/* ── Layout ── */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 24px;
+}
+
+@media (max-width: 768px) {
+  .container { grid-template-columns: 1fr; }
+  .sidebar { display: none; }
+}
+
+/* ── Sidebar filter ── */
+.sidebar {
+  position: sticky;
+  top: 73px;
+  height: fit-content;
+}
+
+.filter-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.filter-title {
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--mono);
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 12px;
+}
+
+.filter-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text2);
+  transition: all 0.15s;
+  user-select: none;
+}
+.filter-item:hover { background: var(--surface2); color: var(--text); }
+.filter-item.active { background: var(--accent-dim); color: var(--accent); }
+.filter-item .count {
+  margin-left: auto;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text3);
+}
+.filter-item.active .count { color: var(--accent); opacity: 0.6; }
+
+/* ── Main content ── */
+.main {}
+
+.results-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  min-height: 28px;
+}
+
+.results-info {
+  font-size: 13px;
+  color: var(--text2);
+  font-family: var(--mono);
+}
+
+.results-info strong { color: var(--accent); }
+
+.sort-select {
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  outline: none;
+  cursor: pointer;
+}
+
+/* ── Product grid ── */
+.product-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.product-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  transition: border-color 0.15s, transform 0.15s;
+  cursor: pointer;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.product-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.product-img {
+  width: 100%;
+  aspect-ratio: 1;
+  background: var(--surface2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 32px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+
+.product-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.product-img .no-img {
+  font-size: 36px;
+  opacity: 0.3;
+}
+
+.score-badge {
+  position: absolute;
+  top: 8px; right: 8px;
+  background: #000000aa;
+  color: var(--accent);
+  font-size: 10px;
+  font-family: var(--mono);
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 20px;
+  backdrop-filter: blur(4px);
+}
+
+.product-info {
+  padding: 12px;
+}
+
+.product-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 4px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.product-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.product-category {
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--text3);
+  background: var(--surface2);
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.product-brand {
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--accent);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.product-desc {
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── Score bar ── */
+.score-bar-wrap {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.score-bar {
+  flex: 1;
+  height: 3px;
+  background: var(--border2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.score-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.score-label {
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--text3);
+  white-space: nowrap;
+}
+
+/* ── Empty / Loading states ── */
+.state-box {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text2);
+}
+
+.state-box .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.3; }
+.state-box h3 { font-size: 15px; font-weight: 500; margin-bottom: 6px; color: var(--text); }
+.state-box p  { font-size: 13px; }
+
+.skeleton {
+  background: linear-gradient(90deg, var(--surface) 25%, var(--surface2) 50%, var(--surface) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s infinite;
+  border-radius: 6px;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+.skeleton-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.skeleton-img  { width: 100%; aspect-ratio: 1; }
+.skeleton-text { height: 12px; margin: 12px; }
+.skeleton-text.short { width: 60%; }
+
+/* ── Toast ── */
+.toast {
+  position: fixed;
+  bottom: 24px; right: 24px;
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  font-size: 13px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px #00000060;
+  animation: slideUp 0.2s ease;
+  z-index: 100;
+  display: none;
+}
+.toast.show { display: block; }
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 16 16"><path d="M6.5 1a5.5 5.5 0 1 0 3.89 9.453l3.328 3.329a1 1 0 1 0 1.414-1.414l-3.328-3.329A5.5 5.5 0 0 0 6.5 1zm-4 5.5a4 4 0 1 1 8 0 4 4 0 0 1-8 0z"/></svg>
+  </div>
+  <span class="header-title">Pencarian Produk</span>
+  <div class="search-wrap">
+    <input
+      type="text"
+      class="search-input"
+      id="search-input"
+      placeholder="Cari produk... contoh: baju olahraga, minuman segar"
+      autocomplete="off"
+    >
+    <svg class="search-icon" id="search-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M6.5 1a5.5 5.5 0 1 0 3.89 9.453l3.328 3.329a1 1 0 1 0 1.414-1.414l-3.328-3.329A5.5 5.5 0 0 0 6.5 1zm-4 5.5a4 4 0 1 1 8 0 4 4 0 0 1-8 0z"/>
+    </svg>
+  </div>
+  <div class="status-dot" id="status-dot"></div>
+</header>
+
+<div class="container">
+  <!-- Sidebar filter -->
+  <aside class="sidebar">
+    <div class="filter-card">
+      <div class="filter-title">Kategori</div>
+      <div id="category-list">
+        <div class="filter-item active" data-cat="" onclick="filterCategory(this, '')">
+          Semua <span class="count" id="count-all">—</span>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main">
+    <div class="results-header">
+      <div class="results-info" id="results-info"></div>
+      <select class="sort-select" id="sort-select" onchange="sortResults(this.value)">
+        <option value="relevance">Paling relevan</option>
+        <option value="name_asc">Nama A-Z</option>
+        <option value="name_desc">Nama Z-A</option>
+      </select>
+    </div>
+    <div class="product-grid" id="product-grid">
+      <div class="state-box">
+        <div class="icon">🔍</div>
+        <h3>Cari produk apa?</h3>
+        <p>Ketik nama, kategori, atau deskripsi produk di atas</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API_URL     = 'http://localhost:3001';
+const DEBOUNCE_MS = 350;
+
+let currentResults  = [];
+let activeCategory  = '';
+let debounceTimer   = null;
+let lastQuery       = '';
+
+const $  = id => document.getElementById(id);
+const grid = $('product-grid');
+
+// ── Category emoji map ────────────────────────────────────────
+const CATEGORY_EMOJI = {
+  'Pakaian Olahraga':    '👕',
+  'Sepatu Olahraga':     '👟',
+  'Perlengkapan Olahraga': '⚽',
+  'Perlengkapan Fitness':'🏋️',
+  'Alat Fitness':        '💪',
+  'Pakaian Formal':      '👔',
+  'Pakaian Kasual':      '🛍️',
+  'Pakaian Wanita':      '👗',
+  'Pakaian Muslim':      '🕌',
+  'Sepatu Kasual':       '👞',
+  'Sepatu Formal':       '👞',
+  'Tas':                 '👜',
+  'Aksesoris':           '⌚',
+  'Mie Instan':          '🍜',
+  'Beras & Serealia':    '🌾',
+  'Minyak & Lemak':      '🫙',
+  'Gula & Pemanis':      '🍬',
+  'Tepung & Bahan Kue':  '🥐',
+  'Bumbu & Saus':        '🫙',
+  'Bumbu & Penyedap':    '🧂',
+  'Susu & Produk Olahan':'🥛',
+  'Susu Bubuk':          '🥛',
+  'Produk Susu':         '🧀',
+  'Minuman':             '🧃',
+  'Air Mineral':         '💧',
+  'Minuman Isotonik':    '⚡',
+  'Minuman Serbuk':      '🍹',
+  'Kopi & Minuman Panas':'☕',
+  'Teh':                 '🍵',
+  'Biskuit & Snack':     '🍪',
+  'Keripik & Snack':     '🥔',
+  'Makanan Kaleng':      '🥫',
+  'Perawatan Tubuh':     '🧴',
+  'Perawatan Rambut':    '💆',
+  'Perawatan Gigi':      '🦷',
+  'Produk Kebersihan':   '🧹',
+  'Pembasmi Serangga':   '🦟',
+  'Obat & Kesehatan':    '💊',
+  'Vitamin & Suplemen':  '💊',
+  'Suplemen Olahraga':   '💪',
+  'Pakaian Renang':      '🏊',
+  'Perlengkapan Renang': '🥽',
+};
+
+function getEmoji(cat) {
+  return CATEGORY_EMOJI[cat] || '📦';
+}
+
+// ── Health check ──────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    const r = await fetch(`${API_URL}/api/health`, { signal: AbortSignal.timeout(3001) });
+    $('status-dot').className = r.ok ? 'status-dot online' : 'status-dot error';
+    // Load categories on first connect
+    if (r.ok) loadCategories();
+  } catch {
+    $('status-dot').className = 'status-dot error';
+  }
+}
+
+async function loadCategories() {
+  try {
+    const r    = await fetch(`${API_URL}/api/search/categories`);
+    const data = await r.json();
+    if (!data.categories) return;
+
+    $('count-all').textContent = data.total;
+
+    const list = $('category-list');
+    // Keep "Semua" item
+    const allItem = list.querySelector('[data-cat=""]');
+    list.innerHTML = '';
+    list.appendChild(allItem);
+
+    data.categories.forEach(cat => {
+      const div = document.createElement('div');
+      div.className = 'filter-item';
+      div.dataset.cat = cat;
+      div.onclick = () => filterCategory(div, cat);
+      div.innerHTML = `${getEmoji(cat)} ${cat} <span class="count">—</span>`;
+      list.appendChild(div);
+    });
+  } catch {}
+}
+
+// ── Search ────────────────────────────────────────────────────
+async function doSearch(query) {
+  if (!query.trim()) {
+    showEmpty();
+    return;
+  }
+
+  lastQuery = query;
+  setLoading(true);
+
+  try {
+    const body = { query, top_k: 30 };
+    if (activeCategory) body.kategori = activeCategory;
+
+    const res  = await fetch(`${API_URL}/api/search`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      showError(data.error || 'Terjadi kesalahan');
+      return;
+    }
+
+    currentResults = data.results || [];
+    renderResults(currentResults, query);
+    updateCategoryCounts(currentResults);
+
+  } catch (err) {
+    showError('Koneksi gagal: ' + err.message);
+    $('status-dot').className = 'status-dot error';
+  } finally {
+    setLoading(false);
+  }
+}
+
+// ── Render results ────────────────────────────────────────────
+function renderResults(results, query = '') {
+  const info = $('results-info');
+
+  if (results.length === 0) {
+    grid.innerHTML = `
+      <div class="state-box">
+        <div class="icon">😕</div>
+        <h3>Produk tidak ditemukan</h3>
+        <p>Coba kata kunci lain atau kurangi filter kategori</p>
+      </div>`;
+    info.innerHTML = `<strong>0</strong> produk untuk "${query}"`;
+    return;
+  }
+
+  info.innerHTML = `<strong>${results.length}</strong> produk relevan${query ? ` untuk "<em>${query}</em>"` : ''}${activeCategory ? ` di <em>${activeCategory}</em>` : ''}`;
+
+  grid.innerHTML = results.map((p, i) => {
+    const scorePercent = Math.round(p.score * 100);
+    const imgHTML = p.image_url
+      ? `<img src="${p.image_url}" alt="${p.name}" onerror="this.parentElement.innerHTML='<span class=no-img>${getEmoji(p.category)}</span>'">`
+      : `<span class="no-img">${getEmoji(p.category)}</span>`;
+
+    return `
+    <div class="product-card" onclick="showToast('${p.name.replace(/'/g, "\\'")}')">
+      <div class="product-img">
+        ${imgHTML}
+        <span class="score-badge">${scorePercent}%</span>
+      </div>
+      <div class="product-info">
+        <div class="product-name">${escHtml(p.name)}</div>
+        <div class="product-meta">
+          <span class="product-category">${escHtml(p.category)}</span>
+          <span class="product-brand">${escHtml(p.brand)}</span>
+        </div>
+        <div class="product-desc">${escHtml(p.description)}</div>
+        <div class="score-bar-wrap">
+          <div class="score-bar">
+            <div class="score-bar-fill" style="width:${scorePercent}%"></div>
+          </div>
+          <span class="score-label">${scorePercent}% relevan</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Category filter ───────────────────────────────────────────
+function filterCategory(el, cat) {
+  activeCategory = cat;
+  document.querySelectorAll('.filter-item').forEach(i => i.classList.remove('active'));
+  el.classList.add('active');
+  if (lastQuery) doSearch(lastQuery);
+}
+
+function updateCategoryCounts(results) {
+  const counts = {};
+  results.forEach(r => {
+    counts[r.category] = (counts[r.category] || 0) + 1;
+  });
+
+  document.querySelectorAll('.filter-item').forEach(item => {
+    const cat     = item.dataset.cat;
+    const countEl = item.querySelector('.count');
+    if (!countEl) return;
+    if (cat === '') {
+      countEl.textContent = results.length;
+    } else {
+      countEl.textContent = counts[cat] || 0;
+    }
+  });
+}
+
+// ── Sort ──────────────────────────────────────────────────────
+function sortResults(mode) {
+  if (!currentResults.length) return;
+  let sorted = [...currentResults];
+  if (mode === 'name_asc')  sorted.sort((a, b) => a.name.localeCompare(b.name));
+  if (mode === 'name_desc') sorted.sort((a, b) => b.name.localeCompare(a.name));
+  if (mode === 'relevance') sorted.sort((a, b) => b.score - a.score);
+  renderResults(sorted, lastQuery);
+}
+
+// ── States ────────────────────────────────────────────────────
+function showEmpty() {
+  currentResults = [];
+  $('results-info').innerHTML = '';
+  grid.innerHTML = `
+    <div class="state-box">
+      <div class="icon">🔍</div>
+      <h3>Cari produk apa?</h3>
+      <p>Ketik nama, kategori, atau deskripsi produk di atas</p>
+    </div>`;
+}
+
+function showError(msg) {
+  grid.innerHTML = `
+    <div class="state-box">
+      <div class="icon">⚠️</div>
+      <h3>Terjadi kesalahan</h3>
+      <p>${escHtml(msg)}</p>
+    </div>`;
+}
+
+function showSkeletons() {
+  grid.innerHTML = Array(8).fill('').map(() => `
+    <div class="skeleton-card">
+      <div class="skeleton skeleton-img"></div>
+      <div class="skeleton skeleton-text" style="margin-top:12px"></div>
+      <div class="skeleton skeleton-text short"></div>
+      <div class="skeleton skeleton-text" style="height:8px; margin-top:8px"></div>
+    </div>`).join('');
+}
+
+function setLoading(v) {
+  const icon = $('search-icon');
+  if (v) {
+    showSkeletons();
+    icon.innerHTML = '<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="25" stroke-dashoffset="25"><animate attributeName="stroke-dashoffset" values="25;-25" dur="0.8s" repeatCount="indefinite"/></circle>';
+  } else {
+    icon.innerHTML = '<path d="M6.5 1a5.5 5.5 0 1 0 3.89 9.453l3.328 3.329a1 1 0 1 0 1.414-1.414l-3.328-3.329A5.5 5.5 0 0 0 6.5 1zm-4 5.5a4 4 0 1 1 8 0 4 4 0 0 1-8 0z"/>';
+  }
+}
+
+// ── Toast ─────────────────────────────────────────────────────
+function showToast(name) {
+  const t = $('toast');
+  t.textContent = `📦 ${name}`;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+// ── Utils ─────────────────────────────────────────────────────
+function escHtml(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Event: debounce search input ──────────────────────────────
+$('search-input').addEventListener('input', e => {
+  const q = e.target.value.trim();
+  clearTimeout(debounceTimer);
+  if (!q) { showEmpty(); return; }
+  debounceTimer = setTimeout(() => doSearch(q), DEBOUNCE_MS);
+});
+
+$('search-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    clearTimeout(debounceTimer);
+    doSearch(e.target.value.trim());
+  }
+});
+
+// ── Init ──────────────────────────────────────────────────────
+checkHealth();
+setInterval(checkHealth, 15000);
+$('search-input').focus();
+</script>
+</body>
+</html>

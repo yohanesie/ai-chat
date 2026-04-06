@@ -1,16 +1,24 @@
 /**
  * docs-helper.mjs — Helper untuk baca file .md dari folder docs/
  * Di-import oleh index.mjs
+ *
+ * Fitur:
+ * - RAM cache: scan disk hanya sekali, selanjutnya dari memori
+ * - Thread-safe: cegah double load saat concurrent request
+ * - Path traversal protection: resolve + sep check
+ * - invalidateDocsCache(): dipanggil dari tool refresh_cache
  */
 
 import { readFile, readdir } from "fs/promises";
-import { join, dirname }     from "path";
-import { fileURLToPath }     from "url";
+import { join, dirname, resolve, sep } from "path";
+import { fileURLToPath } from "url";
 
-const __dirname  = dirname(fileURLToPath(import.meta.url));
-export const DOCS_DIR = join(__dirname, "docs");
+const __dirname   = dirname(fileURLToPath(import.meta.url));
+export const DOCS_DIR = resolve(__dirname, "docs");
 
-/** Rekursif scan semua file .md */
+// ============================================================
+//  SCAN REKURSIF
+// ============================================================
 export async function scanMarkdownFiles(dir) {
   const results = [];
   let entries;
@@ -30,22 +38,61 @@ export async function scanMarkdownFiles(dir) {
   return results;
 }
 
-/** Cari keyword di semua file .md */
+// ============================================================
+//  RAM CACHE
+// ============================================================
+let docsCache        = null;
+let docsCacheLoading = null;
+
+async function initDocsCache() {
+  const files = await scanMarkdownFiles(DOCS_DIR);
+  docsCache = await Promise.all(
+    files.map(async (f) => {
+      const content = await readFile(f, "utf8");
+      return {
+        path:         f,
+        relativePath: f.replace(DOCS_DIR, "").replace(/\\/g, "/").replace(/^\//, ""),
+        content,
+      };
+    })
+  );
+  console.error(`[DOCS-CACHE] ${docsCache.length} file dimuat ke RAM`);
+}
+
+export function invalidateDocsCache() {
+  docsCache        = null;
+  docsCacheLoading = null;
+  console.error("[DOCS-CACHE] Cache diinvalidasi");
+}
+
+async function ensureCache() {
+  if (docsCache) return;
+  if (!docsCacheLoading) {
+    docsCacheLoading = initDocsCache().finally(() => {
+      docsCacheLoading = null;
+    });
+  }
+  await docsCacheLoading;
+}
+
+export async function warmDocsCache() {
+  await ensureCache();
+  return docsCache?.length ?? 0; // ← tambah return ini
+}
+
+// ============================================================
+//  SEARCH — dari RAM, bukan disk
+// ============================================================
 export async function searchDocs(keyword) {
-  const files   = await scanMarkdownFiles(DOCS_DIR);
+  await ensureCache();
+
   const results = [];
   const kw      = keyword.toLowerCase();
 
-  for (const filePath of files) {
-    const content      = await readFile(filePath, "utf8");
-    const relativePath = filePath
-      .replace(DOCS_DIR, "")
-      .replace(/\\/g, "/")
-      .replace(/^\//, "");
+  for (const doc of docsCache) {
+    if (!doc.content.toLowerCase().includes(kw)) continue;
 
-    if (!content.toLowerCase().includes(kw)) continue;
-
-    const lines   = content.split("\n");
+    const lines   = doc.content.split("\n");
     const matches = [];
     for (let i = 0; i < lines.length; i++) {
       if (!lines[i].toLowerCase().includes(kw)) continue;
@@ -54,16 +101,23 @@ export async function searchDocs(keyword) {
       const snippet = lines.slice(start, end + 1).join("\n");
       if (!matches.includes(snippet)) matches.push(snippet);
     }
-    if (matches.length > 0) results.push({ file: relativePath, matches });
+    if (matches.length > 0) results.push({ file: doc.relativePath, matches });
   }
   return results;
 }
 
-/** Baca satu file .md */
+// ============================================================
+//  READ SINGLE FILE — dengan path traversal protection
+// ============================================================
 export async function readDocFile(relPath) {
-  const fullPath = join(DOCS_DIR, relPath);
-  // Guard path traversal
-  if (!fullPath.startsWith(DOCS_DIR)) throw new Error("Path tidak valid");
-  if (!fullPath.endsWith(".md"))       throw new Error("Hanya file .md");
-  return readFile(fullPath, "utf8");
+  const safePath = resolve(DOCS_DIR, relPath);
+
+  if (!safePath.startsWith(DOCS_DIR + sep) && safePath !== DOCS_DIR) {
+    throw new Error("Akses ditolak: path di luar direktori dokumen.");
+  }
+  if (!safePath.endsWith(".md")) {
+    throw new Error("Hanya file .md yang diizinkan.");
+  }
+
+  return readFile(safePath, "utf8");
 }

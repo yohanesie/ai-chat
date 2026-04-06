@@ -28,6 +28,12 @@ import {
   warmDocsCache,
   invalidateDocsCache,
 } from "./docs-helper.mjs";
+import {
+  searchProducts,
+  getIndexInfo,
+  warmProductIndex,
+  invalidateProductIndex,
+} from "./semantic-search.mjs";
 
 const { Pool } = pkg;
 
@@ -128,8 +134,12 @@ const KNOWLEDGE_FILE     = join(__dirname, "knowledge.md");
 const KNOWLEDGE_TEMPLATE = `# Knowledge Base - DB Analyst
 
 ## konvensi
+- initial_store adalah kode toko (string seperti "GBB", "JKT01"), BUKAN ID angka
+- plu = Product Lookup Unit, identifier produk utama
 
 ## relasi
+- Untuk join ke stores, gunakan stores.initial_store bukan stores.id
+- item_stocks.location_code → locations.id (bukan locations.location_code)
 
 ## query
 
@@ -413,7 +423,7 @@ function filterResultsByAllowedFolders(results, allowedFolders) {
 //  MCP SERVER
 // ============================================================
 const server = new Server(
-  { name: "tuf-ai-analyst", version: "5.3.0" },
+  { name: "tuf-ai-analyst", version: "5.4.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -438,7 +448,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "tanya_database",
-      description: "Ambil data dari database menggunakan pertanyaan natural language. JANGAN gunakan untuk membaca catatan — gunakan baca_catatan. Input berupa pertanyaan Bahasa Indonesia, BUKAN SQL mentah.",
+      description: "Gunakan HANYA untuk query data tabel database seperti users, stores, transactions. JANGAN gunakan untuk pencarian produk atau katalog. JANGAN gunakan untuk membaca catatan — gunakan baca_catatan. Input berupa pertanyaan Bahasa Indonesia, BUKAN SQL mentah.",
       inputSchema: {
         type: "object",
         properties: {
@@ -496,43 +506,67 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
+          allowed_folders: { type: "array", items: { type: "string" }, description: "Folder yang boleh diakses. Kosong = semua." },
         },
         additionalProperties: false,
       },
     },
     {
-        name: "cari_dokumen",
-        description: [
-          "Cari keyword di semua file .md (peraturan, SOP, kebijakan, glosarium).",
-          "Trigger: 'apa itu X', 'peraturan X', 'prosedur X', 'kebijakan X'.",
-          "Untuk pertanyaan pasal/ayat/point spesifik → panggil baca_dokumen untuk baca file lengkap.",
-          "WAJIB gunakan isi hasil tool sebagai jawaban. DILARANG mengarang.",
-        ].join(" "),
-        inputSchema: {
-          type: "object",
-          properties: {
-            keyword: { type: "string", description: "Kata kunci yang dicari." },
-          },
-          required: ["keyword"],
-          additionalProperties: false,
-        },
-      },
-    {
-      name: "baca_dokumen",
-      description: [
-        "Baca isi lengkap satu file .md.",
-        "Gunakan untuk membaca peraturan, pasal, atau dokumen lengkap.",
-        "Path yang tersedia: 'pp/pp.md' (peraturan perusahaan), 'glosarium/glosarium.md' (glosarium).",
-        "Trigger: 'baca pp', 'baca peraturan', 'pasal X di peraturan', 'baca dokumen X'.",
-      ].join(" "),
+      name: "cari_dokumen",
+      description: "Cari keyword di semua file .md (peraturan, SOP, kebijakan, glosarium). Trigger: 'apa itu X', 'peraturan X', 'prosedur X'. Return potongan teks relevan.",
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "Path file. Contoh: 'pp/pp.md'" },
+          keyword:         { type: "string", description: "Kata kunci yang dicari." },
+          allowed_folders: { type: "array", items: { type: "string" }, description: "Folder yang boleh diakses. Kosong = semua." },
+        },
+        required: ["keyword"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "baca_dokumen",
+      description: "Baca isi lengkap satu file .md. Contoh path: 'glosarium/glosarium.md', 'hr/cuti.md'.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path relatif dari folder docs." },
         },
         required: ["path"],
         additionalProperties: false,
       },
+    },
+    {
+      name: "cari_produk",
+      description: "Gunakan untuk mencari produk/barang berdasarkan kata kunci seperti 'makanan','minuman', 'sepatu', 'isotonic', dll.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Kata kunci pencarian produk"
+          },
+          kategori: {
+            type: "string",
+            description: "Filter kategori (optional)"
+          },
+          top_k: {
+            type: "number",
+            description: "Jumlah hasil (default 10, max 20)"
+          }
+        },
+        required: ["query"],
+        additionalProperties: false
+      }
+    },
+    {
+      name: "info_produk_index",
+      description: "Menampilkan status index produk (jumlah, kategori, dll).",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false
+      }
     },
   ],
 }));
@@ -789,22 +823,80 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // ── baca_dokumen ──────────────────────────────────────────
-    if (toolName === "baca_dokumen") {
-      const relPath = (args.path || "").trim().replace(/\\/g, "/");
-      if (!relPath || relPath.includes("..") || relPath.startsWith("/")) {
-        return { content: [{ type: "text", text: "❌ Path tidak valid." }] };
+      if (toolName === "baca_dokumen") {
+        const relPath = (args.path || "").trim().replace(/\\/g, "/");
+        if (!relPath || relPath.includes("..") || relPath.startsWith("/")) {
+          return { content: [{ type: "text", text: "❌ Path tidak valid." }] };
+        }
+        try {
+          const content = await readDocFile(relPath);
+          const limit   = 10_000;
+          const isTrunc = content.length > limit;
+          const final   = isTrunc ? content.slice(0, limit) + "\n\n... (dipotong)" : content;
+          log("DOCS", `baca_dokumen("${relPath}") → ${final.length} chars`);
+          return { content: [{ type: "text", text: `📄 ${relPath}:\n\n${final}` }] };
+        } catch (e) {
+          return { content: [{ type: "text", text: `❌ ${e.message}` }] };
+        }
       }
-      try {
-        const content = await readDocFile(relPath);
-        const limit   = 10_000;
-        const isTrunc = content.length > limit;
-        const final   = isTrunc ? content.slice(0, limit) + "\n\n... (dipotong)" : content;
-        log("DOCS", `baca_dokumen("${relPath}") → ${final.length} chars`);
-        return { content: [{ type: "text", text: `📄 ${relPath}:\n\n${final}` }] };
-      } catch (e) {
-        return { content: [{ type: "text", text: `❌ ${e.message}` }] };
+
+      // ── cari_produk ───────────────────────────────────────────
+      if (toolName === "cari_produk") {
+        const query    = (args.query || "").trim();
+        const kategori = args.kategori || null;
+        const topK     = Math.min(args.top_k || 10, 20);
+
+        if (!query) return { content: [{ type: "text", text: "❌ Query tidak boleh kosong." }] };
+
+        let results;
+        try {
+          results = await searchProducts(query, { topK, threshold: 0.25, category: kategori });
+        } catch (err) {
+          if (err.message.includes("Index belum ada")) {
+            return { content: [{ type: "text", text: "❌ Index produk belum dibuat. Jalankan: node build-index.mjs" }] };
+          }
+          throw err;
+        }
+
+        if (results.length === 0) {
+          return { content: [{ type: "text", text: `🔍 Tidak ada produk relevan untuk "${query}".` }] };
+        }
+
+        const lines = results.map((r, i) =>
+          `${i + 1}. **${r.name}** (${r.category})
+    Brand: ${r.brand} | Relevansi: ${Math.round(r.score * 100)}%
+    ${r.description}`
+        );
+
+        log("SEMANTIC", `cari_produk("${query}") → ${results.length} hasil`);
+        return {
+          content: [{
+            type: "text",
+            text: `🛍️ Hasil pencarian "${query}" (${results.length} produk):
+
+  ${lines.join("\n\n")}`,
+          }],
+        };
       }
+
+    // ── info_produk_index ─────────────────────────────────────
+    if (toolName === "info_produk_index") {
+    const info = await getIndexInfo();
+    if (!info.ready) {
+      return { content: [{ type: "text", text: `❌ ${info.message}` }] };
     }
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `📦 Product Index Status:`,
+          `   Total produk : ${info.total}`,
+          `   Kategori     : ${info.categories.join(", ")}`,
+          `   Status       : ✅ Siap digunakan`,
+        ].join("\n"),
+      }],
+    };
+  }
 
     // ── Fallback ──────────────────────────────────────────────
     return { content: [{ type: "text", text: `❌ Tool '${toolName}' tidak dikenal.` }] };
@@ -823,13 +915,15 @@ await loadKnowledge();
 try {
   await getTableNames();
   await getFKRelations();
-  const docsCount = await warmDocsCache();
-  log("READY", `tuf-ai-analyst v5.3.0`);
-  log("READY", `Model : ${OLLAMA_MODEL}`);
-  log("READY", `DB    : ${DB_CONFIG.database}@${DB_CONFIG.host}:${DB_CONFIG.port}`);
-  log("READY", `Docs  : ${docsCount} file di-cache ke RAM`);
+  const docsCount    = await warmDocsCache();
+  const productCount = await warmProductIndex();
+  log("READY", "tuf-ai-analyst v5.4.0");
+  log("READY", "Model    : " + OLLAMA_MODEL);
+  log("READY", "DB       : " + DB_CONFIG.database + "@" + DB_CONFIG.host + ":" + DB_CONFIG.port);
+  log("READY", "Docs     : " + docsCount + " file di-cache ke RAM");
+  log("READY", "Products : " + (productCount > 0 ? productCount + " produk ter-index" : "index belum ada — jalankan: node build-index.mjs"));
 } catch (err) {
-  log("ERROR", `Gagal startup: ${err.message}`);
+  log("ERROR", "Gagal startup: " + err.message);
   process.exit(1);
 }
 
